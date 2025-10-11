@@ -1,0 +1,42 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data and Models
+*.pyc
+*.pyo
+*.pyd
+data/faiss_index/
+data/model_cache/
+data/*.wav
+temp_audio.wav
+
+# Exports
+*.csv
+*.xlsx
+*.pdf
+
+# Config with sensitive data
+config.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+

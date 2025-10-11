@@ -1,0 +1,260 @@
+"""
+LLM-based SQL Generator with RAG support
+Uses lightweight local models for SQL generation with RAG context
+"""
+
+import sys
+import os
+from typing import Optional, Dict, Any
+
+# Add parent directory to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from src.utils.logger import logger
+
+# Try to import transformers
+try:
+    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
+    import torch
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    logger.w("LLM_INIT", "transformers not installed - LLM features disabled")
+    logger.i("LLM_INIT", "To enable: pip install transformers torch")
+
+
+class LLMSQLGenerator:
+    """
+    LLM-based SQL generator using local models
+    Falls back to pattern matching if models not available
+    """
+
+    def __init__(self, model_name: str = "google/flan-t5-base"):
+        """
+        Initialize LLM SQL generator
+
+        Args:
+            model_name: Hugging Face model to use
+        """
+        self.model_name = model_name
+        self.model = None
+        self.tokenizer = None
+        self.pipeline = None
+        self.enabled = TRANSFORMERS_AVAILABLE
+
+        if not self.enabled:
+            logger.w("LLM_INIT", "LLM features disabled - missing dependencies")
+            return
+
+        try:
+            logger.i("LLM_INIT", f"Loading LLM model: {model_name}")
+            logger.i("LLM_INIT", "This may take a few minutes on first run...")
+
+            # Load tokenizer and model
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+
+            # Create pipeline for easier usage
+            self.pipeline = pipeline(
+                "text2text-generation",
+                model=self.model,
+                tokenizer=self.tokenizer,
+                max_length=512,
+                device=-1  # CPU
+            )
+
+            logger.i("LLM_INIT", "LLM model loaded successfully")
+            self.enabled = True
+
+        except Exception as e:
+            logger.e("LLM_INIT", f"Failed to load LLM model: {str(e)}", e)
+            self.enabled = False
+
+    def generate_sql(
+        self,
+        nl_query: str,
+        context: str,
+        temperature: float = 0.3,
+        max_new_tokens: int = 150
+    ) -> Optional[str]:
+        """
+        Generate SQL from natural language using LLM with RAG context
+
+        Args:
+            nl_query: Natural language query
+            context: RAG context (database schema info)
+            temperature: Sampling temperature (lower = more deterministic)
+            max_new_tokens: Maximum tokens to generate
+
+        Returns:
+            Generated SQL query or None if failed
+        """
+        if not self.enabled:
+            logger.w("LLM_GENERATE", "LLM not available")
+            return None
+
+        try:
+            logger.d("LLM_GENERATE", f"Generating SQL for: '{nl_query}'")
+
+            # Construct prompt
+            prompt = self._build_prompt(nl_query, context)
+            logger.d("LLM_GENERATE", f"Prompt length: {len(prompt)} characters")
+
+            # Generate SQL
+            result = self.pipeline(
+                prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=True if temperature > 0 else False,
+                top_p=0.9,
+                num_return_sequences=1
+            )
+
+            # Extract SQL from result
+            generated_text = result[0]['generated_text']
+            sql = self._extract_sql(generated_text)
+
+            if sql:
+                logger.i("LLM_GENERATE", f"Generated SQL: {sql[:100]}...")
+                return sql
+            else:
+                logger.w("LLM_GENERATE", "Failed to extract valid SQL from generation")
+                return None
+
+        except Exception as e:
+            logger.e("LLM_GENERATE", f"SQL generation failed: {str(e)}", e)
+            return None
+
+    def _build_prompt(self, nl_query: str, context: str) -> str:
+        """
+        Build prompt for SQL generation
+
+        Args:
+            nl_query: Natural language query
+            context: Database schema context
+
+        Returns:
+            Formatted prompt string
+        """
+        prompt = f"""You are a SQL expert. Convert the natural language question to a PostgreSQL SQL query.
+
+{context}
+
+Rules:
+1. Generate ONLY valid PostgreSQL SQL
+2. Use proper table and column names from the schema
+3. Include semicolon at the end
+4. For aggregations, use appropriate GROUP BY
+5. Use ORDER BY for sorting results
+6. Return ONLY the SQL query, no explanations
+
+Question: {nl_query}
+
+SQL Query:"""
+
+        return prompt
+
+    def _extract_sql(self, generated_text: str) -> Optional[str]:
+        """
+        Extract and validate SQL from generated text
+
+        Args:
+            generated_text: Text generated by LLM
+
+        Returns:
+            Extracted SQL or None
+        """
+        # Remove common prefixes
+        text = generated_text.strip()
+
+        # Remove "SQL:" or "Query:" prefixes
+        for prefix in ["SQL:", "Query:", "Answer:"]:
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+
+        # Ensure it ends with semicolon
+        if not text.endswith(';'):
+            text += ';'
+
+        # Basic validation - should start with SELECT, INSERT, UPDATE, or DELETE
+        text_upper = text.upper()
+        valid_starts = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'WITH']
+
+        if any(text_upper.startswith(start) for start in valid_starts):
+            return text
+
+        logger.w("LLM_EXTRACT", f"Generated text doesn't look like SQL: {text[:100]}")
+        return None
+
+    def validate_sql(self, sql: str) -> tuple[bool, str]:
+        """
+        Validate SQL query for safety
+
+        Args:
+            sql: SQL query to validate
+
+        Returns:
+            (is_valid, error_message)
+        """
+        sql_upper = sql.upper().strip()
+
+        # Only allow SELECT queries for safety
+        if not sql_upper.startswith('SELECT') and not sql_upper.startswith('WITH'):
+            return False, "Only SELECT queries are allowed"
+
+        # Check for dangerous keywords
+        dangerous_keywords = ['DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'CREATE', 'INSERT', 'UPDATE']
+        for keyword in dangerous_keywords:
+            if keyword in sql_upper:
+                return False, f"Dangerous keyword detected: {keyword}"
+
+        # Basic syntax check
+        if sql.count('(') != sql.count(')'):
+            return False, "Unbalanced parentheses"
+
+        if sql.count("'") % 2 != 0:
+            return False, "Unbalanced quotes"
+
+        return True, ""
+
+
+# Test function
+def test_llm_generator():
+    """Test LLM SQL generator"""
+    logger.section("LLM SQL Generator Test")
+
+    generator = LLMSQLGenerator()
+
+    if not generator.enabled:
+        print("⚠️  LLM features not available (missing dependencies)")
+        print("   Install: pip install transformers torch")
+        return
+
+    # Test queries with context
+    context = """Database Schema:
+Table: sales
+Columns: id (INTEGER), date (DATE), amount (DECIMAL), product (VARCHAR), region (VARCHAR)
+"""
+
+    test_queries = [
+        "Show total sales",
+        "Sales by product",
+        "Top 5 products by revenue"
+    ]
+
+    for query in test_queries:
+        print(f"\nQuery: {query}")
+        sql = generator.generate_sql(query, context)
+        if sql:
+            valid, error = generator.validate_sql(sql)
+            print(f"SQL: {sql}")
+            print(f"Valid: {valid}" + (f" - {error}" if not valid else ""))
+        else:
+            print("Failed to generate SQL")
+        print("-" * 60)
+
+    logger.separator()
+
+
+if __name__ == "__main__":
+    test_llm_generator()
+

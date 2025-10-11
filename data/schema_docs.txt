@@ -1,0 +1,26 @@
+Table: sales
+Columns:
+- id: INTEGER (Primary Key, auto-increment, unique identifier for each sale)
+- date: DATE (format: YYYY-MM-DD, the date when the sale occurred)
+- amount: DECIMAL (sales amount in dollars with 2 decimal places, e.g., 1234.56)
+- product: VARCHAR (product name - possible values: Widget, Gadget, Gizmo, Tool, Device)
+- region: VARCHAR (sales region - possible values: North, South, East, West)
+
+Common Query Examples:
+1. Total sales: SELECT SUM(amount) FROM sales;
+2. Sales by product: SELECT product, SUM(amount) as total FROM sales GROUP BY product;
+3. Sales by region: SELECT region, SUM(amount) as total FROM sales GROUP BY region ORDER BY total DESC;
+4. Sales in date range: SELECT * FROM sales WHERE date BETWEEN '2025-08-01' AND '2025-08-31';
+5. Top 10 sales: SELECT * FROM sales ORDER BY amount DESC LIMIT 10;
+6. Average sales by product: SELECT product, AVG(amount) as average FROM sales GROUP BY product;
+7. Sales count by region: SELECT region, COUNT(*) as count FROM sales GROUP BY region;
+8. Monthly sales: SELECT DATE_TRUNC('month', date) as month, SUM(amount) as total FROM sales GROUP BY month;
+
+Natural Language Query Examples:
+- "show me total sales" -> SELECT SUM(amount) FROM sales;
+- "sales by region" -> SELECT region, SUM(amount) FROM sales GROUP BY region;
+- "top 5 products" -> SELECT product, SUM(amount) as total FROM sales GROUP BY product ORDER BY total DESC LIMIT 5;
+- "sales in August 2025" -> SELECT * FROM sales WHERE date >= '2025-08-01' AND date < '2025-09-01';
+- "average sale amount" -> SELECT AVG(amount) FROM sales;
+- "how many sales in the North region" -> SELECT COUNT(*) FROM sales WHERE region = 'North';
+
