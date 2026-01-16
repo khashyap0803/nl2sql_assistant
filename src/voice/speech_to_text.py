@@ -33,6 +33,14 @@ class SpeechToText:
         self.device = "cuda"
         self.compute_type = "float16"
         
+        if not WHISPER_AVAILABLE:
+            logger.e("STT_INIT", "Cannot initialize STT: faster-whisper not available")
+            raise RuntimeError("STT requires faster-whisper but it failed to load")
+        
+        if not SOUNDDEVICE_AVAILABLE:
+            logger.e("STT_INIT", "Cannot initialize STT: sounddevice not available")
+            raise RuntimeError("STT requires sounddevice but it failed to load")
+        
         try:
             logger.i("STT_INIT", f"Loading Whisper {model_name} on GPU (CUDA)...")
             
