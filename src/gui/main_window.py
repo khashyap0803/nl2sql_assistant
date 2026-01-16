@@ -3,9 +3,6 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from src.voice.speech_to_text import SpeechToText
-from src.llm.nl2sql_converter import NL2SQLConverter
-from src.database.db_controller import DatabaseController
 from src.reports.report_generator import ReportGenerator
 from config import config
 
@@ -91,6 +88,10 @@ class MainWindow(QMainWindow):
             
             self.db = None
         else:
+            from src.database.db_controller import DatabaseController
+            from src.llm.nl2sql_converter import NL2SQLConverter
+            from src.voice.speech_to_text import SpeechToText
+            
             self.db = DatabaseController()
             self.db.connect()
             
