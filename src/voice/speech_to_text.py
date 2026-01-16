@@ -7,21 +7,20 @@ from src.utils.logger import logger
 
 WHISPER_AVAILABLE = False
 SOUNDDEVICE_AVAILABLE = False
+WhisperModel = None
 
 try:
     from faster_whisper import WhisperModel
     WHISPER_AVAILABLE = True
     logger.i("STT_INIT", "faster-whisper library loaded (GPU)")
 except (ImportError, OSError, Exception) as e:
-    logger.e("STT_INIT", f"faster-whisper not available: {e}")
-    raise RuntimeError(f"STT is mandatory but faster-whisper failed: {e}")
+    logger.w("STT_INIT", f"faster-whisper not available: {e} (OK for remote mode)")
 
 try:
     import sounddevice as sd
     SOUNDDEVICE_AVAILABLE = True
 except ImportError as e:
-    logger.e("STT_INIT", f"sounddevice not installed: {e}")
-    raise RuntimeError(f"STT is mandatory but sounddevice not available: {e}")
+    logger.w("STT_INIT", f"sounddevice not installed: {e}")
 
 
 class SpeechToText:
