@@ -1,2 +1,1 @@
-"""Voice input/output module"""
 

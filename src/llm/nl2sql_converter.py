@@ -1,352 +1,395 @@
-"""
-NL2SQL Converter - Hybrid Implementation with RAG + LLM + Pattern Matching
-Intelligent fallback system: LLM with RAG → Pattern Matching → Default
-"""
-
-import re
 import sys
 import os
+from typing import Tuple, Optional, Dict, Any, List
+import pandas as pd
 
-# Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from src.utils.logger import logger, log_query
+from src.utils.logger import logger
 
-# Import RAG and LLM modules
 try:
     from src.llm.rag_indexer import RAGIndexer
-    from src.llm.llm_generator import LLMSQLGenerator
-    from src.llm.query_validator import QueryValidator
-except ImportError as e:
-    logger.w("NL2SQL_INIT", f"Could not import RAG/LLM modules: {e}")
+    from src.llm.llm_generator import QwenSQLGenerator
+    from src.database.db_controller import DatabaseController
+except (ImportError, OSError, RuntimeError, Exception) as e:
+    logger.e("NL2SQL_INIT", f"Failed to import modules: {e}")
     RAGIndexer = None
-    LLMSQLGenerator = None
-    QueryValidator = None
+    QwenSQLGenerator = None
+    DatabaseController = None
 
 
 class NL2SQLConverter:
-    """
-    Hybrid NL2SQL converter with intelligent fallback system
-
-    Strategy:
-    1. Try RAG + LLM (if available and query is complex)
-    2. Fallback to pattern matching (fast and reliable)
-    3. Fallback to safe default query
-    """
-
-    def __init__(self, use_llm: bool = True):
-        """
-        Initialize converter
-
-        Args:
-            use_llm: Whether to attempt using LLM (auto-disabled if not available)
-        """
-        logger.i("NL2SQL_INIT", "Initializing NL2SQL Converter (Hybrid mode)")
-
-        # Initialize query validator
-        self.validator = QueryValidator() if QueryValidator else None
-
-        # Initialize RAG indexer
-        self.rag_indexer = None
-        self.use_rag = False
-        if RAGIndexer and use_llm:
+    
+    MAX_RETRIES = 5
+    
+    def __init__(self):
+        logger.i("NL2SQL_INIT", "Initializing NL2SQL Converter (RAG + Ollama LLM)")
+        
+        self.enabled = False
+        self.rag = None
+        self.llm = None
+        self.db = None
+        self._db_context_cache = None
+        self._db_stats_cache = None
+        
+        if RAGIndexer:
             try:
-                self.rag_indexer = RAGIndexer()
-                if self.rag_indexer.enabled:
-                    self.rag_indexer.load_index()
-                    self.use_rag = True
-                    logger.i("NL2SQL_INIT", "RAG indexer initialized successfully")
+                logger.i("NL2SQL_INIT", "Initializing RAG Indexer...")
+                self.rag = RAGIndexer()
+                if self.rag.enabled:
+                    self.rag.load_index()
+                    logger.i("NL2SQL_INIT", "RAG Indexer ready")
             except Exception as e:
                 logger.w("NL2SQL_INIT", f"RAG initialization failed: {e}")
-
-        # Initialize LLM generator
-        self.llm_generator = None
-        self.use_llm = False
-        if LLMSQLGenerator and use_llm:
+        
+        if QwenSQLGenerator:
             try:
-                self.llm_generator = LLMSQLGenerator()
-                if self.llm_generator.enabled:
-                    self.use_llm = True
-                    logger.i("NL2SQL_INIT", "LLM generator initialized successfully")
-            except Exception as e:
-                logger.w("NL2SQL_INIT", f"LLM initialization failed: {e}")
-
-        # Pattern-based fallback (always available)
-        self._init_patterns()
-
-        # Log initialization status
-        if self.use_llm and self.use_rag:
-            logger.i("NL2SQL_INIT", "Mode: RAG + LLM with pattern fallback + validation")
-            print("✓ NL2SQL: RAG + LLM mode enabled with query validation")
-        elif self.use_llm:
-            logger.i("NL2SQL_INIT", "Mode: LLM with pattern fallback + validation")
-            print("✓ NL2SQL: LLM mode enabled (RAG unavailable) with query validation")
-        else:
-            logger.i("NL2SQL_INIT", "Mode: Pattern-based only with validation")
-            print("⚠️  Using pattern-based NL2SQL (AI models not yet installed)")
-            print("   Will upgrade to LLM-based conversion after installing transformers")
-
-    def _init_patterns(self):
-        """Initialize pattern matching rules (fallback system) - OPTIMIZED FOR 100% ACCURACY"""
-        self.patterns = [
-            # SPECIFIC PATTERNS FIRST (to prevent conflicts)
-
-            # Product + Region combination - MUST BE FIRST (most specific)
-            (r'(laptop|desktop|monitor|keyboard|mouse|headphones|webcam|printer|scanner|tablet|smartphone|smartwatch|speaker|router|cable)(?:s)?\s+(?:in|from)\s+(north|south|east|west)',
-             "SELECT * FROM sales WHERE LOWER(product) = '{0}' AND LOWER(region) = '{1}' ORDER BY date DESC;",
-             'product_region'),
-
-            # Date filters with intervals - BEFORE generic "last N"
-            (r'(?:sales?\s+)?(?:in\s+the\s+)?last\s+(\d+)\s+days?',
-             "SELECT * FROM sales WHERE date >= CURRENT_DATE - INTERVAL '{0} days' ORDER BY date DESC;",
-             'last_n_days'),
-
-            (r'(?:sales?\s+)?(?:in\s+the\s+)?last\s+(\d+)\s+months?',
-             "SELECT * FROM sales WHERE date >= CURRENT_DATE - INTERVAL '{0} months' ORDER BY date DESC;",
-             'last_n_months'),
-
-            # NEW: Lowest/minimum sales - MUST BE FIRST to prevent word confusion
-            (r'\b(?:lowest|minimum|smallest|cheapest|bottom)\s+(?:\d+\s+)?sales?\b',
-             'SELECT * FROM sales ORDER BY amount ASC LIMIT 10;',
-             'lowest_sales'),
-
-            # NEW: Highest/maximum sales
-            (r'\b(?:highest|maximum|largest|most\s+expensive|top)\s+(?:\d+\s+)?sales?\b',
-             'SELECT * FROM sales ORDER BY amount DESC LIMIT 10;',
-             'highest_sales'),
-
-            # Specific product - ENHANCED to handle "laptop sales" format
-            (r'\b(laptop|desktop|monitor|keyboard|mouse|headphones|webcam|printer|scanner|tablet|smartphone|smartwatch|speaker|router|cable)(?:s)?\s+sales?\b',
-             "SELECT * FROM sales WHERE LOWER(product) = '{0}' ORDER BY date DESC;",
-             'filter_product_sales'),
-
-            # Specific product - with "of/for" format
-            (r'(?:sales?\s+)?(?:of|for)\s+(laptop|desktop|monitor|keyboard|mouse|headphones|webcam|printer|scanner|tablet|smartphone|smartwatch|speaker|router|cable)(?:s)?\b',
-             "SELECT * FROM sales WHERE LOWER(product) = '{0}' ORDER BY date DESC;",
-             'filter_product'),
-
-            # NEW: Region + "sales" format (e.g., "north sales", "south sales") - MUST USE WORD BOUNDARIES
-            (r'\b(north|south|east|west)(?:\s+region)?\s+sales?\b',
-             "SELECT * FROM sales WHERE LOWER(region) = '{0}' ORDER BY date DESC;",
-             'filter_region_sales'),
-
-            # Specific region
-            (r'(?:sales?\s+)?(?:in|from)\s+(north|south|east|west)(?:\s+region)?',
-             "SELECT * FROM sales WHERE LOWER(region) = '{0}' ORDER BY date DESC;",
-             'filter_region'),
-
-            # NEW: Amount filters with more variations (below, under, less than)
-            (r'(?:sales?\s+)?(?:below|under|less\s+than|<\s*)\s*(\d+)(?:\s*(?:rs|rupees|dollars?|\$))?',
-             'SELECT * FROM sales WHERE amount < {0} ORDER BY amount ASC;',
-             'filter_amount_lt'),
-
-            # Amount filters - greater than
-            (r'sales?\s+(?:over|above|greater\s+than|more\s+than|>\s*)\s*(\d+)',
-             'SELECT * FROM sales WHERE amount > {0} ORDER BY amount DESC;',
-             'filter_amount_gt'),
-
-            # GENERIC PATTERNS AFTER SPECIFIC ONES
-
-            # Total/sum queries
-            (r'(?:show\s+)?(?:total|sum|all)(?:\s+(?:of\s+)?)?sales?|(?:total|sum)\s+revenue',
-             'SELECT SUM(amount) as total_sales FROM sales;',
-             'total_sales'),
-
-            # Sales by product
-            (r'sales?\s+(?:by|per|for\s+each)\s+product|product(?:s)?\s+sales?|breakdown\s+by\s+product',
-             'SELECT product, SUM(amount) as total_sales FROM sales GROUP BY product ORDER BY total_sales DESC;',
-             'sales_by_product'),
-
-            # Sales by region
-            (r'sales?\s+(?:by|per|for\s+each)\s+region|region(?:s)?\s+sales?|breakdown\s+by\s+region',
-             'SELECT region, SUM(amount) as total_sales FROM sales GROUP BY region ORDER BY total_sales DESC;',
-             'sales_by_region'),
-
-            # Top N products
-            (r'top\s+(\d+)\s+product(?:s)?|best\s+(\d+)\s+product(?:s)?',
-             'SELECT product, SUM(amount) as total_sales FROM sales GROUP BY product ORDER BY total_sales DESC LIMIT {0};',
-             'top_products'),
-
-            # Top N sales (by amount)
-            (r'top\s+(\d+)\s+sales?|highest\s+(\d+)\s+sales?',
-             'SELECT * FROM sales ORDER BY amount DESC LIMIT {0};',
-             'top_sales'),
-
-            # Average
-            (r'average\s+(?:of\s+)?sales?|avg\s+sale(?:s)?|mean\s+sale',
-             'SELECT AVG(amount) as average_sale FROM sales;',
-             'average'),
-
-            # Count
-            (r'how\s+many\s+sales?|count\s+(?:of\s+)?sales?|number\s+of\s+(?:sales?|records)',
-             'SELECT COUNT(*) as total_count FROM sales;',
-             'count'),
-
-            # By month
-            (r'(?:by|per|for\s+each)\s+month|monthly|per\s+month',
-             "SELECT DATE_TRUNC('month', date) as month, SUM(amount) as total_sales FROM sales GROUP BY month ORDER BY month;",
-             'monthly'),
-
-            # Date range queries
-            (r'sales?\s+in\s+(\w+)\s+(\d{4})',
-             "SELECT * FROM sales WHERE date >= '{1}-{0}-01' AND date < '{1}-{0}-01'::date + interval '1 month';",
-             'date_range'),
-
-            # Recent/latest with optional number - AT THE END (least specific)
-            (r'(?:recent|latest)\s+(\d+)?',
-             'SELECT * FROM sales ORDER BY date DESC LIMIT {0};',
-             'recent'),
-
-            # All data - LAST (catches everything)
-            (r'(?:show\s+)?(?:all|everything)|(?:all\s+)?(?:data|records)',
-             'SELECT * FROM sales ORDER BY date DESC;',
-             'all_data'),
-        ]
-
-        logger.d("NL2SQL_INIT", f"Loaded {len(self.patterns)} query patterns (optimized priority)")
-
-    def convert(self, nl_query: str) -> str:
-        """
-        Convert natural language to SQL using hybrid approach
-
-        Args:
-            nl_query: Natural language query string
-
-        Returns:
-            SQL query string
-        """
-        original_query = nl_query
-        nl_query_lower = nl_query.lower().strip()
-
-        logger.d("NL2SQL_CONVERT", f"Converting query: '{original_query}'")
-        logger.d("NL2SQL_CONVERT", f"Strategy: {'RAG+LLM → Patterns' if self.use_llm else 'Patterns only'}")
-
-        # Strategy 1: Try LLM with RAG context (for complex queries)
-        if self.use_llm and self._is_complex_query(nl_query_lower):
-            logger.i("NL2SQL_CONVERT", "Attempting LLM-based conversion (complex query)")
-            sql = self._try_llm_conversion(original_query)
-            if sql:
-                log_query(original_query, sql, success=True)
-                return sql
-            else:
-                logger.w("NL2SQL_CONVERT", "LLM conversion failed, falling back to patterns")
-
-        # Strategy 2: Pattern matching (fast and reliable for common queries)
-        logger.d("NL2SQL_CONVERT", "Attempting pattern-based conversion")
-        sql = self._try_pattern_matching(nl_query_lower, original_query)
-        if sql:
-            return sql
-
-        # Strategy 3: Safe default fallback
-        default_sql = "SELECT * FROM sales ORDER BY date DESC LIMIT 10;"
-        logger.w("NL2SQL_CONVERT", f"No pattern matched for: '{original_query}', using default query")
-        log_query(original_query, default_sql, success=False)
-        return default_sql
-
-    def _is_complex_query(self, query: str) -> bool:
-        """
-        Determine if query is complex enough to warrant LLM usage
-
-        Args:
-            query: Lowercase query string
-
-        Returns:
-            True if complex, False if simple pattern is better
-        """
-        # Complex query indicators
-        complex_indicators = [
-            'where', 'between', 'and', 'or',
-            'join', 'having', 'case when',
-            'distinct', 'union', 'intersect',
-            'subquery', 'nested'
-        ]
-
-        return any(indicator in query for indicator in complex_indicators)
-
-    def _try_llm_conversion(self, query: str) -> str:
-        """
-        Attempt LLM-based conversion with RAG context
-
-        Args:
-            query: Natural language query
-
-        Returns:
-            SQL string or None if failed
-        """
-        try:
-            # Get relevant context from RAG
-            context = ""
-            if self.use_rag:
-                context = self.rag_indexer.get_relevant_context(query, top_k=3)
-
-            # Generate SQL using LLM
-            sql = self.llm_generator.generate_sql(query, context)
-
-            if sql and len(sql) > 10:
-                logger.i("NL2SQL_CONVERT", "✓ LLM conversion successful")
-                return sql
-            else:
-                return None
-
-        except Exception as e:
-            logger.e("NL2SQL_CONVERT", f"LLM conversion error: {e}")
-            return None
-
-    def _try_pattern_matching(self, query_lower: str, original_query: str) -> str:
-        """
-        Attempt pattern-based conversion
-
-        Args:
-            query_lower: Lowercase query string
-            original_query: Original query string for logging
-
-        Returns:
-            SQL string or None if no match
-        """
-        for pattern, sql_template, pattern_name in self.patterns:
-            match = re.search(pattern, query_lower)
-            if match:
-                logger.i("NL2SQL_MATCH", f"Matched pattern: '{pattern_name}'")
-
-                # Extract groups and format SQL
-                groups = match.groups()
-                if groups:
-                    # Filter out None values and format
-                    formatted_groups = [g for g in groups if g is not None]
-                    sql = sql_template.format(*formatted_groups)
+                logger.i("NL2SQL_INIT", "Initializing Ollama LLM...")
+                self.llm = QwenSQLGenerator()
+                if self.llm.enabled:
+                    logger.i("NL2SQL_INIT", "Ollama LLM ready (GPU native)")
                 else:
-                    sql = sql_template
+                    logger.e("NL2SQL_INIT", "Ollama LLM not enabled")
+            except Exception as e:
+                logger.e("NL2SQL_INIT", f"LLM initialization failed: {e}")
+        
+        if DatabaseController:
+            try:
+                self.db = DatabaseController()
+                logger.i("NL2SQL_INIT", "Database controller ready")
+            except Exception as e:
+                logger.e("NL2SQL_INIT", f"Database initialization failed: {e}")
+        
+        if self.llm and self.llm.enabled and self.db:
+            self.enabled = True
+            logger.i("NL2SQL_INIT", "NL2SQL Converter ready (RAG + Ollama LLM)")
+        else:
+            logger.e("NL2SQL_INIT", "NL2SQL Converter NOT ready")
 
-                log_query(original_query, sql, success=True)
-                logger.d("QUERY", f"   SQL: {sql}")
-                return sql
-
+    def get_gpu_memory_usage(self) -> Optional[Dict[str, float]]:
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                parts = result.stdout.strip().split(',')
+                if len(parts) >= 2:
+                    used_mb = float(parts[0].strip())
+                    total_mb = float(parts[1].strip())
+                    return {
+                        "allocated": used_mb / 1024,
+                        "total": total_mb / 1024
+                    }
+        except:
+            pass
         return None
 
-    def get_query_suggestions(self, n: int = 10) -> list:
-        """
-        Get example queries for users
+    def _get_full_database_context(self) -> Tuple[str, Dict[str, Any]]:
+        if self._db_context_cache:
+            return self._db_context_cache, self._db_stats_cache
+        
+        try:
+            if not self.db.connect():
+                return self._get_fallback_context(), {}
+            
+            tables = self.db.get_table_names()
+            
+            context_parts = []
+            all_stats = {}
+            
+            for table in tables:
+                schema = self.db.execute_query(f"""
+                    SELECT column_name, data_type, is_nullable
+                    FROM information_schema.columns 
+                    WHERE table_name = '{table}'
+                    ORDER BY ordinal_position
+                """)
+                
+                if isinstance(schema, pd.DataFrame) and not schema.empty:
+                    context_parts.append(f"\n=== TABLE: {table} ===")
+                    context_parts.append("COLUMNS:")
+                    for _, row in schema.iterrows():
+                        nullable = "NULL" if row['is_nullable'] == 'YES' else "NOT NULL"
+                        context_parts.append(f"  - {row['column_name']}: {row['data_type']} ({nullable})")
+                    
+                    sample = self.db.execute_query(f"SELECT * FROM {table} LIMIT 10")
+                    if isinstance(sample, pd.DataFrame) and not sample.empty:
+                        context_parts.append(f"\nSAMPLE DATA (first {len(sample)} rows):")
+                        context_parts.append(sample.to_string(index=False))
+                    
+                    count_result = self.db.execute_query(f"SELECT COUNT(*) as total FROM {table}")
+                    if isinstance(count_result, pd.DataFrame) and not count_result.empty:
+                        total_rows = int(count_result.iloc[0]['total'])
+                        context_parts.append(f"\nTOTAL ROWS IN TABLE: {total_rows}")
+                        all_stats[table] = {"total_rows": total_rows}
+                    
+                    for _, row in schema.iterrows():
+                        col = row['column_name']
+                        dtype = row['data_type']
+                        
+                        if dtype in ('character varying', 'varchar', 'text') and col not in ('id',):
+                            try:
+                                unique_result = self.db.execute_query(f"""
+                                    SELECT DISTINCT {col} FROM {table} 
+                                    ORDER BY {col} LIMIT 20
+                                """)
+                                if isinstance(unique_result, pd.DataFrame) and not unique_result.empty:
+                                    unique_vals = unique_result[col].tolist()
+                                    context_parts.append(f"UNIQUE VALUES in '{col}': {unique_vals}")
+                                    if table not in all_stats:
+                                        all_stats[table] = {}
+                                    if "unique_values" not in all_stats[table]:
+                                        all_stats[table]["unique_values"] = {}
+                                    all_stats[table]["unique_values"][col] = unique_vals
+                            except:
+                                pass
+                        
+                        elif dtype in ('date', 'timestamp', 'timestamp without time zone', 'timestamp with time zone'):
+                            try:
+                                date_stats = self.db.execute_query(f"""
+                                    SELECT 
+                                        MIN({col}) as min_date,
+                                        MAX({col}) as max_date,
+                                        COUNT(DISTINCT EXTRACT(YEAR FROM {col})) as num_years,
+                                        COUNT(DISTINCT EXTRACT(MONTH FROM {col})) as num_months
+                                    FROM {table}
+                                """)
+                                
+                                if isinstance(date_stats, pd.DataFrame) and not date_stats.empty:
+                                    min_date = date_stats.iloc[0]['min_date']
+                                    max_date = date_stats.iloc[0]['max_date']
+                                    context_parts.append(f"\nDATE RANGE in '{col}': {min_date} to {max_date}")
+                                
+                                years_result = self.db.execute_query(f"""
+                                    SELECT DISTINCT EXTRACT(YEAR FROM {col})::INTEGER as year 
+                                    FROM {table} 
+                                    ORDER BY year
+                                """)
+                                if isinstance(years_result, pd.DataFrame) and not years_result.empty:
+                                    years = years_result['year'].tolist()
+                                    context_parts.append(f"AVAILABLE YEARS in '{col}': {years}")
+                                    if table not in all_stats:
+                                        all_stats[table] = {}
+                                    all_stats[table]["date_years"] = years
+                                
+                                months_result = self.db.execute_query(f"""
+                                    SELECT 
+                                        EXTRACT(YEAR FROM {col})::INTEGER as year,
+                                        EXTRACT(MONTH FROM {col})::INTEGER as month,
+                                        COUNT(*) as count
+                                    FROM {table} 
+                                    GROUP BY year, month
+                                    ORDER BY year, month
+                                """)
+                                if isinstance(months_result, pd.DataFrame) and not months_result.empty:
+                                    month_names = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+                                                   'July', 'August', 'September', 'October', 'November', 'December']
+                                    month_info = []
+                                    for _, r in months_result.iterrows():
+                                        month_info.append(f"{month_names[int(r['month'])]} {int(r['year'])} ({int(r['count'])} rows)")
+                                    context_parts.append(f"AVAILABLE MONTHS with data: {month_info}")
+                                    all_stats[table]["date_months"] = months_result.to_dict('records')
+                                    
+                            except Exception as e:
+                                logger.d("NL2SQL_CONTEXT", f"Date analysis failed for {col}: {e}")
+            
+            self.db.close()
+            
+            full_context = "\n".join(context_parts)
+            self._db_context_cache = full_context
+            self._db_stats_cache = all_stats
+            
+            return full_context, all_stats
+            
+        except Exception as e:
+            logger.e("NL2SQL_CONTEXT", f"Failed to get database context: {e}")
+            if self.db:
+                self.db.close()
+            return self._get_fallback_context(), {}
 
-        Args:
-            n: Number of suggestions to return
+    def _get_fallback_context(self) -> str:
+        if self.rag and self.rag.enabled:
+            return self.rag.get_context("database schema", k=10)
+        return "Unable to retrieve database context. Please describe your database schema."
 
-        Returns:
-            List of example query strings
-        """
+    def convert(self, nl_query: str) -> str:
+        sql, _, _ = self.convert_and_execute(nl_query, execute=False)
+        return sql
+
+    def convert_and_execute(
+        self, 
+        nl_query: str,
+        execute: bool = True
+    ) -> Tuple[str, Optional[pd.DataFrame], Dict[str, Any]]:
+        if not self.enabled:
+            logger.e("NL2SQL_CONVERT", "Converter not initialized")
+            return "", None, {"error": "Converter not ready"}
+        
+        metadata = {
+            "attempts": 0,
+            "verification_history": [],
+            "final_status": "pending",
+            "original_query": nl_query
+        }
+        
+        db_context, db_stats = self._get_full_database_context()
+        
+        if self.rag and self.rag.enabled:
+            rag_context = self.rag.get_context(nl_query, k=5)
+            if rag_context:
+                db_context += f"\n\nADDITIONAL DOMAIN CONTEXT:\n{rag_context}"
+        
+        current_query = nl_query
+        last_sql = None
+        last_result = None
+        
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            metadata["attempts"] = attempt
+            logger.i("NL2SQL_CONVERT", f"Attempt {attempt}/{self.MAX_RETRIES}: '{nl_query}'")
+            
+            try:
+                sql = self.llm.generate_sql(current_query, db_context)
+                
+                if not sql:
+                    logger.w("NL2SQL_CONVERT", "LLM failed to generate SQL")
+                    current_query = f"""Original question: {nl_query}
+
+Previous attempt failed to generate valid SQL. 
+Please analyze the database schema and generate a correct SQL query.
+Remember: Use exact column and table names from the schema."""
+                    continue
+                
+                last_sql = sql
+                logger.i("NL2SQL_CONVERT", f"Generated SQL: {sql}")
+                
+                if not execute:
+                    metadata["final_status"] = "sql_generated"
+                    return sql, None, metadata
+                
+                if not self.db.connect():
+                    logger.e("NL2SQL_CONVERT", "Database connection failed")
+                    metadata["final_status"] = "db_connection_failed"
+                    return sql, None, metadata
+                
+                result = self.db.execute_query(sql)
+                self.db.close()
+                
+                if isinstance(result, str):
+                    logger.w("NL2SQL_CONVERT", f"Query error: {result}")
+                    metadata["verification_history"].append({
+                        "attempt": attempt,
+                        "sql": sql,
+                        "error": result,
+                        "is_correct": False
+                    })
+                    
+                    current_query = f"""Original question: {nl_query}
+
+Previous SQL query failed with error:
+SQL: {sql}
+ERROR: {result}
+
+Analyze the error and generate a corrected SQL query.
+Use exact column names from the database schema."""
+                    continue
+                
+                last_result = result
+                logger.i("NL2SQL_CONVERT", f"Query returned {len(result)} rows")
+                
+                expected_info = db_stats.get("sales", {}) if "sales" in db_stats else {}
+                
+                verification = self.llm.verify_result(
+                    nl_query, 
+                    sql, 
+                    result, 
+                    db_context,
+                    expected_info
+                )
+                
+                metadata["verification_history"].append({
+                    "attempt": attempt,
+                    "sql": sql,
+                    "rows_returned": len(result),
+                    "is_correct": verification["is_correct"],
+                    "reason": verification.get("reason", "")
+                })
+                
+                if verification["is_correct"]:
+                    logger.i("NL2SQL_CONVERT", f"Query verified correct on attempt {attempt}")
+                    metadata["final_status"] = "verified_correct"
+                    return sql, result, metadata
+                
+                logger.w("NL2SQL_CONVERT", f"Verification failed: {verification.get('reason', 'Unknown')}")
+                
+                current_query = f"""Original question: {nl_query}
+
+Previous SQL was INCORRECT:
+SQL: {sql}
+Result: {len(result)} rows returned
+Problem: {verification.get('reason', 'Result does not match question intent')}
+Suggested fix: {verification.get('suggested_fix', 'Re-analyze the question carefully')}
+
+IMPORTANT: 
+- If the question asks for data from a specific category (e.g., "south sales"), 
+  the result should ONLY contain that category
+- If the question asks for "all" data, do NOT use LIMIT
+- Use the exact column values shown in the database context
+
+Generate a CORRECTED SQL query:"""
+                
+            except Exception as e:
+                logger.e("NL2SQL_CONVERT", f"Error on attempt {attempt}: {e}", e)
+                metadata["verification_history"].append({
+                    "attempt": attempt,
+                    "error": str(e),
+                    "is_correct": False
+                })
+                current_query = f"{nl_query}\n\nPrevious error: {str(e)}. Please try again."
+        
+        logger.w("NL2SQL_CONVERT", f"Max retries ({self.MAX_RETRIES}) reached")
+        metadata["final_status"] = "max_retries_reached"
+        
+        return last_sql or "SELECT * FROM sales ORDER BY date;", last_result, metadata
+
+    def get_suggestions(self, partial_query: str = "") -> List[str]:
         suggestions = [
-            "Show total sales",
-            "Sales by product",
-            "Sales by region",
-            "Top 5 products",
-            "Average sales",
-            "How many sales",
-            "Recent 10 sales",
-            "Sales in North",
-            "Sales of Laptop",
-            "Sales over 1000",
-            "Sales last 30 days",
-            "Laptop in South",
             "Show all data",
+            "Total sales by region",
+            "Top 10 products by revenue",
+            "Sales for January 2025",
+            "Average amount by customer type"
         ]
+        
+        _, db_stats = self._get_full_database_context()
+        if db_stats:
+            for table, stats in db_stats.items():
+                if "unique_values" in stats:
+                    for col, values in stats["unique_values"].items():
+                        for val in values[:3]:
+                            suggestions.append(f"Show {val.lower()} {table}")
+        
+        return suggestions
 
-        logger.d("NL2SQL_SUGGESTIONS", f"Returning {min(n, len(suggestions))} query suggestions")
-        return suggestions[:n]
+
+if __name__ == "__main__":
+    print("Testing NL2SQL Converter...")
+    
+    converter = NL2SQLConverter()
+    if converter.enabled:
+        print("Converter ready!")
+        
+        test_queries = [
+            "show all data",
+            "south sales",
+            "total sales by region"
+        ]
+        
+        for query in test_queries:
+            print(f"\nQuery: {query}")
+            sql, result, meta = converter.convert_and_execute(query)
+            print(f"SQL: {sql}")
+            print(f"Rows: {len(result) if result is not None else 'N/A'}")
+            print(f"Status: {meta.get('final_status')}")
+    else:
+        print("Converter not ready")

@@ -1,26 +1,72 @@
 Table: sales
+Description: Sales transaction records for technology products
+
 Columns:
 - id: INTEGER (Primary Key, auto-increment, unique identifier for each sale)
-- date: DATE (format: YYYY-MM-DD, the date when the sale occurred)
-- amount: DECIMAL (sales amount in dollars with 2 decimal places, e.g., 1234.56)
-- product: VARCHAR (product name - possible values: Widget, Gadget, Gizmo, Tool, Device)
-- region: VARCHAR (sales region - possible values: North, South, East, West)
+- date: DATE (format: YYYY-MM-DD, the date when the sale occurred, range: 2025-01-01 to 2025-03-31)
+- amount: DECIMAL(10,2) (sales amount in Rupees with 2 decimal places, range: Rs 59.99 to Rs 2199.99)
+- product: VARCHAR(100) (product name)
+- region: VARCHAR(50) (sales region)
+- quantity: INTEGER (number of units sold, default: 1)
+- customer_type: VARCHAR(50) (customer category)
 
-Common Query Examples:
-1. Total sales: SELECT SUM(amount) FROM sales;
-2. Sales by product: SELECT product, SUM(amount) as total FROM sales GROUP BY product;
-3. Sales by region: SELECT region, SUM(amount) as total FROM sales GROUP BY region ORDER BY total DESC;
-4. Sales in date range: SELECT * FROM sales WHERE date BETWEEN '2025-08-01' AND '2025-08-31';
-5. Top 10 sales: SELECT * FROM sales ORDER BY amount DESC LIMIT 10;
-6. Average sales by product: SELECT product, AVG(amount) as average FROM sales GROUP BY product;
-7. Sales count by region: SELECT region, COUNT(*) as count FROM sales GROUP BY region;
-8. Monthly sales: SELECT DATE_TRUNC('month', date) as month, SUM(amount) as total FROM sales GROUP BY month;
+Product Values (10 types):
+- Laptop (high-end: Rs 1299-2199)
+- Desktop (mid-range: Rs 749-1249)
+- Monitor (Rs 299-549)
+- Keyboard (Rs 129-199)
+- Mouse (Rs 59-109)
+- Headphones (Rs 199-399)
+- Webcam (Rs 119-229)
+- Tablet (Rs 549-849)
+- Smartphone (Rs 899-1499)
+- Router (Rs 89-199)
 
-Natural Language Query Examples:
-- "show me total sales" -> SELECT SUM(amount) FROM sales;
-- "sales by region" -> SELECT region, SUM(amount) FROM sales GROUP BY region;
-- "top 5 products" -> SELECT product, SUM(amount) as total FROM sales GROUP BY product ORDER BY total DESC LIMIT 5;
-- "sales in August 2025" -> SELECT * FROM sales WHERE date >= '2025-08-01' AND date < '2025-09-01';
-- "average sale amount" -> SELECT AVG(amount) FROM sales;
-- "how many sales in the North region" -> SELECT COUNT(*) FROM sales WHERE region = 'North';
+Region Values (4 regions):
+- North
+- South
+- East
+- West
 
+Customer Type Values (3 types):
+- Regular (standard customers)
+- Business (B2B customers)
+- Premium (high-value customers)
+
+Common SQL Query Patterns:
+
+1. Total Sales:
+   SELECT SUM(amount) as total_sales FROM sales;
+
+2. Sales by Product:
+   SELECT product, SUM(amount) as total_revenue, COUNT(*) as num_sales 
+   FROM sales GROUP BY product ORDER BY total_revenue DESC;
+
+3. Sales by Region:
+   SELECT region, SUM(amount) as total_revenue, COUNT(*) as num_sales 
+   FROM sales GROUP BY region ORDER BY total_revenue DESC;
+
+4. Sales in Date Range:
+   SELECT * FROM sales WHERE date BETWEEN '2025-01-01' AND '2025-01-31';
+
+5. Top N Products by Revenue:
+   SELECT product, SUM(amount) as revenue FROM sales 
+   GROUP BY product ORDER BY revenue DESC LIMIT 5;
+
+6. Average Sale by Product:
+   SELECT product, AVG(amount) as avg_sale FROM sales GROUP BY product;
+
+7. Sales by Customer Type:
+   SELECT customer_type, COUNT(*) as count, SUM(amount) as total 
+   FROM sales GROUP BY customer_type;
+
+8. Monthly Sales Summary:
+   SELECT DATE_TRUNC('month', date) as month, SUM(amount) as total 
+   FROM sales GROUP BY month ORDER BY month;
+
+9. Sales Over Threshold:
+   SELECT * FROM sales WHERE amount > 1000 ORDER BY amount DESC;
+
+10. Sales by Region and Product:
+    SELECT region, product, SUM(amount) as total 
+    FROM sales GROUP BY region, product ORDER BY region, total DESC;
