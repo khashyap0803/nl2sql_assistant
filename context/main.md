@@ -145,13 +145,48 @@ def main():
         # Launch GUI
 ```
 
-#### Command-Line Arguments:
+#### Command Line Arguments
 
-| Argument | Action | Description |
-|----------|--------|-------------|
-| (none) | Launch GUI | Start the main application window |
-| `--test` | Run tests | Test database connection and show sample data |
-| `--help` | Show help | Display usage instructions |
+| Argument | Description |
+|----------|-------------|
+| (none) | Launch GUI in **local mode** (GPU required) |
+| `--test` | Test database connection and exit |
+| `--help` | Show help message |
+| `--server <url>` | Launch GUI in **remote mode** (connects to server) |
+
+### Examples
+
+```bash
+# Local mode (requires GPU, Ollama, PostgreSQL)
+python main.py
+
+# Remote mode (lightweight, no GPU needed)
+python main.py --server https://abc123.trycloudflare.com
+
+# Test database
+python main.py --test
+
+# Show help
+python main.py --help
+```
+
+---
+
+## Modes of Operation
+
+### Local Mode (Default)
+
+When run without arguments, `main.py` initializes all GPU components locally:
+- NL2SQLConverter (Ollama LLM)
+- SpeechToText (Whisper Large-v3)
+- DatabaseController (PostgreSQL)
+
+### Remote Mode
+
+When run with `--server <url>`, `main.py` uses lightweight HTTP clients:
+- RemoteNL2SQLClient → Sends queries to server
+- RemoteSpeechToText → Records locally, transcribes on server
+- No database connection needed locally
 
 #### How `--test` Works:
 
